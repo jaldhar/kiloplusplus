@@ -1,1 +1,9 @@
-kilo
+.vscode/
+debug/*.d
+debug/*.o
+debug/kilo
+debug/valgrind.log
+release/*.d
+release/*.o
+release/kilo
+release/valgrind.log
