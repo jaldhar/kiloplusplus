@@ -94,7 +94,7 @@ struct editorConfig E;
 
 /*** filetypes ***/
 
-const char *C_HL_extensions[] = { ".c", ".h", ".cpp", NULL };
+const char *C_HL_extensions[] = { ".c", ".h", ".cc", ".cpp", NULL };
 const char *C_HL_keywords[] = {
   "switch", "if", "while", "for", "break", "continue", "return", "else",
   "struct", "union", "typedef", "static", "enum", "class", "case",
