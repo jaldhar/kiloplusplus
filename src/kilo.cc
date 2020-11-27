@@ -2,17 +2,17 @@
 
 #define _POSIX_C_SOURCE 200809L
 
-#include <ctype.h>
-#include <errno.h>
+#include <cctype>
+#include <cerrno>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <fcntl.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <termios.h>
-#include <time.h>
 #include <unistd.h>
 
 /*** defines ***/
@@ -55,12 +55,12 @@ enum editorHighlight {
 /*** data ***/
 
 struct editorSyntax {
-  char *filetype;
-  char **filematch;
-  char **keywords;
-  char *singleline_comment_start;
-  char *multiline_comment_start;
-  char *multiline_comment_end;
+  const char *filetype;
+  const char **filematch;
+  const char **keywords;
+  const char *singleline_comment_start;
+  const char *multiline_comment_start;
+  const char *multiline_comment_end;
   int flags;
 };
 
@@ -94,8 +94,8 @@ struct editorConfig E;
 
 /*** filetypes ***/
 
-char *C_HL_extensions[] = { ".c", ".h", ".cpp", NULL };
-char *C_HL_keywords[] = {
+const char *C_HL_extensions[] = { ".c", ".h", ".cpp", NULL };
+const char *C_HL_keywords[] = {
   "switch", "if", "while", "for", "break", "continue", "return", "else",
   "struct", "union", "typedef", "static", "enum", "class", "case",
   "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
@@ -119,13 +119,13 @@ struct editorSyntax HLDB[] = {
 
 void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
-char *editorPrompt(char *prompt, void (*callback)(char *, int));
+char *editorPrompt(const char *prompt, void (*callback)(char *, int));
 
 /*** terminal ***/
 
 void die(const char *s) {
-  write(STDOUT_FILENO, "\x1b[2J", 4);
-  write(STDOUT_FILENO, "\x1b[H", 3);
+  if (write(STDOUT_FILENO, "\x1b[2J", 4) == -1) perror("write");
+  if (write(STDOUT_FILENO, "\x1b[H", 3) == -1) perror("write");
 
   perror(s);
   exit(1);
@@ -240,16 +240,16 @@ int is_separator(int c) {
 }
 
 void editorUpdateSyntax(erow *row) {
-  row->hl = realloc(row->hl, row->rsize);
+  row->hl = reinterpret_cast<unsigned char*>(realloc(row->hl, row->rsize));
   memset(row->hl, HL_NORMAL, row->rsize);
 
   if (E.syntax == NULL) return;
 
-  char **keywords = E.syntax->keywords;
+  const char **keywords = E.syntax->keywords;
 
-  char *scs = E.syntax->singleline_comment_start;
-  char *mcs = E.syntax->multiline_comment_start;
-  char *mce = E.syntax->multiline_comment_end;
+  const char *scs = E.syntax->singleline_comment_start;
+  const char *mcs = E.syntax->multiline_comment_start;
+  const char *mce = E.syntax->multiline_comment_end;
 
   int scs_len = scs ? strlen(scs) : 0;
   int mcs_len = mcs ? strlen(mcs) : 0;
@@ -262,7 +262,8 @@ void editorUpdateSyntax(erow *row) {
   int i = 0;
   while (i < row->rsize) {
     char c = row->render[i];
-    unsigned char prev_hl = (i > 0) ? row->hl[i - 1] : HL_NORMAL;
+    unsigned char prev_hl = (i > 0) ? row->hl[i - 1]
+                                    : static_cast<unsigned char>(HL_NORMAL);
 
     if (scs_len && !in_string && !in_comment) {
       if (!strncmp(&row->render[i], scs, scs_len)) {
@@ -427,7 +428,8 @@ void editorUpdateRow(erow *row) {
     if (row->chars[j] == '\t') tabs++;
 
   free(row->render);
-  row->render = malloc(row->size + tabs*(KILO_TAB_STOP - 1) + 1);
+  row->render =
+    reinterpret_cast<char*>(malloc(row->size + tabs*(KILO_TAB_STOP - 1) + 1));
 
   int idx = 0;
   for (j = 0; j < row->size; j++) {
@@ -444,17 +446,18 @@ void editorUpdateRow(erow *row) {
   editorUpdateSyntax(row);
 }
 
-void editorInsertRow(int at, char *s, size_t len) {
+void editorInsertRow(int at, const char *s, size_t len) {
   if (at < 0 || at > E.numrows) return;
 
-  E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
+  E.row =
+    reinterpret_cast<erow*>(realloc(E.row, sizeof(erow) * (E.numrows + 1)));
   memmove(&E.row[at + 1], &E.row[at], sizeof(erow) * (E.numrows - at));
   for (int j = at + 1; j <= E.numrows; j++) E.row[j].idx++;
 
   E.row[at].idx = at;
 
   E.row[at].size = len;
-  E.row[at].chars = malloc(len + 1);
+  E.row[at].chars = reinterpret_cast<char*>(malloc(len + 1));
   memcpy(E.row[at].chars, s, len);
   E.row[at].chars[len] = '\0';
 
@@ -485,7 +488,7 @@ void editorDelRow(int at) {
 
 void editorRowInsertChar(erow *row, int at, int c) {
   if (at < 0 || at > row->size) at = row->size;
-  row->chars = realloc(row->chars, row->size + 2);
+  row->chars = reinterpret_cast<char*>(realloc(row->chars, row->size + 2));
   memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
   row->size++;
   row->chars[at] = c;
@@ -527,7 +530,8 @@ void editorInsertNewline() {
 }
 
 void editorRowAppendString(erow *row, char *s, size_t len) {
-  row->chars = realloc(row->chars, row->size + len + 1);
+  row->chars =
+    reinterpret_cast<char*>(realloc(row->chars, row->size + len + 1));
   memcpy(&row->chars[row->size], s, len);
   row->size += len;
   row->chars[row->size] = '\0';
@@ -560,7 +564,7 @@ char *editorRowsToString(int *buflen) {
     totlen += E.row[j].size + 1;
   *buflen = totlen;
 
-  char *buf = malloc(totlen);
+  char *buf = reinterpret_cast<char*>(malloc(totlen));
   char *p = buf;
   for (j = 0; j < E.numrows; j++) {
     memcpy(p, E.row[j].chars, E.row[j].size);
@@ -671,7 +675,7 @@ void editorFindCallback(char *query, int key) {
       E.rowoff = E.numrows;
 
       saved_hl_line = current;
-      saved_hl = malloc(row->rsize);
+      saved_hl = reinterpret_cast<char*>(malloc(row->rsize));
       memcpy(saved_hl, row->hl, row->rsize);
       memset(&row->hl[match - row->render], HL_MATCH, strlen(query));
       break;
@@ -707,11 +711,11 @@ struct abuf {
 #define ABUF_INIT {NULL, 0}
 
 void abAppend(struct abuf *ab, const char *s, int len) {
-  char *new = realloc(ab->b, ab->len + len);
+  char *newab = reinterpret_cast<char*>(realloc(ab->b, ab->len + len));
 
-  if (new == NULL) return;
-  memcpy(&new[ab->len], s, len);
-  ab->b = new;
+  if (newab == NULL) return;
+  memcpy(&newab[ab->len], s, len);
+  ab->b = newab;
   ab->len += len;
 }
 
@@ -720,9 +724,9 @@ void abFree(struct abuf *ab) {
 }
 
 /*** input ***/
-char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
+char *editorPrompt(const char *prompt, void (*callback)(char *, int)) {
   size_t bufsize = 128;
-  char *buf = malloc(bufsize);
+  char *buf = reinterpret_cast<char*>(malloc(bufsize));
   size_t buflen = 0;
   buf[0] = '\0';
 
@@ -747,7 +751,7 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
     } else if (!iscntrl(c) && c < 128) {
       if (buflen == bufsize - 1) {
         bufsize *= 2;
-        buf = realloc(buf, bufsize);
+        buf = reinterpret_cast<char*>(realloc(buf, bufsize));
       }
       buf[buflen++] = c;
       buf[buflen] = '\0';
@@ -813,8 +817,8 @@ void editorProcessKeypress() {
         quit_times--;
         return;
       }
-      write(STDOUT_FILENO, "\x1b[2J", 4);
-      write(STDOUT_FILENO, "\x1b[H", 3);
+      if (write(STDOUT_FILENO, "\x1b[2J", 4) == -1) die("write");
+      if (write(STDOUT_FILENO, "\x1b[H", 3) == -1) die("write");
       exit(0);
       break;
 
@@ -1014,7 +1018,7 @@ void editorRefreshScreen() {
 
   abAppend(&ab, "\x1b[?25h", 6);
 
-  write(STDOUT_FILENO, ab.b, ab.len);
+  if (write(STDOUT_FILENO, ab.b, ab.len) == -1) die("write");
   abFree(&ab);
 }
 
