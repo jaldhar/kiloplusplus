@@ -20,11 +20,12 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include "row.h"
+#include "syntax.h"
+
 /*** defines ***/
 
 constexpr const char* KILO_VERSION = "0.0.1";
-
-constexpr const std::size_t KILO_TAB_STOP = 8;
 
 constexpr const int KILO_QUIT_TIMES = 3;
 
@@ -43,20 +44,6 @@ enum editorKey {
   PAGE_DOWN
 };
 
-enum class HL : unsigned char {
-  NORMAL = 0,
-  COMMENT,
-  MLCOMMENT,
-  KEYWORD1,
-  KEYWORD2,
-  STRING,
-  NUMBER,
-  MATCH
-};
-
-#define HL_HIGHLIGHT_NUMBERS (1<<0)
-#define HL_HIGHLIGHT_STRINGS (1<<1)
-
 enum class FGColor {
   BLACK   = 30,
   RED     = 31,
@@ -68,118 +55,7 @@ enum class FGColor {
   WHITE   = 37
 };
 
-struct Row;
-
-void editorUpdateSyntax(Row&);
-
 /*** data ***/
-
-struct EditorSyntax {
-  std::string filetype;
-  std::vector<const char*> filematch;
-  std::vector<std::string> keywords;
-  std::string singleline_comment_start;
-  std::string multiline_comment_start;
-  std::string multiline_comment_end;
-  int flags;
-};
-
-using Highlight = std::basic_string<HL>;
-
-struct Row {
-  explicit Row(std::size_t, const char*);
-
-  void append(std::string);
-  void erase(std::size_t);
-  void insert(std::size_t, int);
-  void update();
-
-  int  cxtorx(int);
-  std::size_t rxtocx(int);
-
-  std::size_t idx;
-  std::string chars;
-  std::string render;
-  Highlight   hl;
-  int         hl_open_comment;
-};
-
-Row::Row(std::size_t at, const char *s) : idx{at}, chars{s},
-render{}, hl{}, hl_open_comment{0} {
-}
-
-void Row::append(std::string s) {
-  chars += s;
-  update();
-}
-
-void Row::erase(std::size_t at) {
-  if (at >= chars.length()) {
-    return;
-  }
-  chars.erase(at, 1);
-  update();
-}
-
-void Row::insert(std::size_t at, int c) {
-  if (at > chars.length()) {
-    at = chars.length();
-  }
-  chars.insert(at, 1, c);
-  update();
-}
-
-void Row::update() {
-  int tabs = 0;
-  for (auto& j: chars) {
-    if (j == '\t') {
-      tabs++;
-    }
-  }
-
-  render.resize(chars.length() + tabs*(KILO_TAB_STOP - 1));
-
-  int idx = 0;
-  for (auto& j: chars) {
-    if (j == '\t') {
-      render[idx++] = ' ';
-      while (idx % KILO_TAB_STOP != 0) {
-        render[idx++] = ' ';
-      }
-    } else {
-      render[idx++] = j;
-    }
-  }
-
-  editorUpdateSyntax(*this);
-}
-
-int Row::cxtorx(int cx) {
-  int rx = 0;
-  for (auto j = 0; j < cx; j++) {
-    if (chars[j] == '\t') {
-      rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
-    }
-    rx++;
-  }
-  return rx;
-}
-
-std::size_t Row::rxtocx(int rx) {
-  int cur_rx = 0;
-  std::size_t cx;
-  for (cx = 0; cx < chars.length(); cx++) {
-    if (chars[cx] == '\t') {
-      cur_rx += (KILO_TAB_STOP - 1) - (cur_rx % KILO_TAB_STOP);
-    }
-    cur_rx++;
-
-    if (cur_rx > rx) {
-      return cx;
-    }
-  }
-  return cx;
-}
 
 struct EditorConfig {
   EditorConfig();
