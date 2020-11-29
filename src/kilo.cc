@@ -52,67 +52,68 @@ enum class FGColor {
   BLUE    = 34,
   MAGENTA = 35,
   CYAN    = 36,
-  WHITE   = 37
+  WHITE   = 37,
+  RESET   = 39
 };
 
 /*** data ***/
 
-struct EditorConfig {
-  EditorConfig();
-  EditorConfig(const EditorConfig&)=delete;
-  EditorConfig& operator=(const EditorConfig&)=delete;
+struct Screen {
+  Screen();
+  ~Screen();
 
-  std::size_t cx, cy;
-  std::size_t rx;
-  std::size_t rowoff;
-  std::size_t coloff;
-  int screenrows;
-  int screencols;
-  std::vector<Row> rows;
-  bool dirty;
-  std::string filename;
-  char statusmsg[80];
-  time_t statusmsg_time;
-  std::optional<EditorSyntax> syntax;
+  bool clear();
+  void clearToEOL();
+  void die(const char *s);
+  void disableRawMode();
+  void enableRawMode();
+  bool getCursorPosition();
+  bool getWindowSize();
+  void hideCursor();
+  void inverse(bool);
+  void moveCursor(std::size_t, std::size_t);
+  void print(const char*, std::size_t);
+  int  readKey();
+  void refresh();
+  void setFGColor(FGColor);
+  void showCursor();
+
+  int cols;
+  int rows;
   struct termios orig_termios;
-} E;
+  std::string ab;
+} screen;
 
-EditorConfig::EditorConfig() : cx{0}, cy{0}, rx{0}, rowoff{0}, coloff{0},
-screenrows{0}, screencols{0}, rows{}, dirty{false}, filename{}, statusmsg{0},
-statusmsg_time{0}, syntax{std::nullopt}, orig_termios{} {
+Screen::Screen() : cols{0}, rows{0}, orig_termios{}, ab{} {
+  if (!getWindowSize()) {
+    die("getWindowSize");
+  }
+  rows -= 2;
+  enableRawMode();
 }
 
+Screen::~Screen() {
+  disableRawMode();
+}
 
-/*** filetypes ***/
-
-std::vector<EditorSyntax> hldb {
-  {
-    "c",
-    { ".c", ".h", ".cc", ".cpp" },
-    {
-      "switch", "if", "while", "for", "break", "continue", "return", "else",
-      "struct", "union", "typedef", "static", "enum", "class", "case",
-      "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
-      "void|"
-    },
-    "//", "/*", "*/",
-    HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
-  }
-};
-
-/*** prototypes ***/
-
-void editorSetStatusMessage(const char *fmt, ...);
-void editorRefreshScreen();
-std::string editorPrompt(const char *prompt, void (*callback)(std::string&, int));
-
-/*** terminal ***/
-
-void die(const char *s) {
+bool Screen::clear() {
   if (write(STDOUT_FILENO, "\x1b[2J", 4) == -1) {
-    perror("write");
+    return false;
   }
+
   if (write(STDOUT_FILENO, "\x1b[H", 3) == -1) {
+    return false;
+  }
+
+  return true;
+}
+
+void Screen::clearToEOL() {
+  ab.append("\x1b[K", 3);
+}
+
+void Screen::die(const char *s) {
+  if (!clear()) {
     perror("write");
   }
 
@@ -120,19 +121,18 @@ void die(const char *s) {
   exit(1);
 }
 
-void disableRawMode() {
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1) {
+void Screen::disableRawMode() {
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios) == -1) {
     die("tcsetattr");
   }
 }
 
-void enableRawMode() {
-  if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1) {
+void Screen::enableRawMode() {
+  if (tcgetattr(STDIN_FILENO, &orig_termios) == -1) {
     die("tcgetattr");
   }
-  atexit(disableRawMode);
 
-  struct termios raw = E.orig_termios;
+  struct termios raw = orig_termios;
   raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
   raw.c_oflag &= ~(OPOST);
   raw.c_cflag |= (CS8);
@@ -145,7 +145,78 @@ void enableRawMode() {
   }
 }
 
-int editorReadKey() {
+bool Screen::getCursorPosition() {
+
+  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) {
+    return false;
+  }
+
+  char buf[32];
+  unsigned int i = 0;
+
+  while (i < sizeof(buf) - 1) {
+    if (read(STDIN_FILENO, &buf[i], 1) != 1) {
+      break;
+    }
+    if (buf[i] == 'R') {
+      break;
+    }
+    i++;
+  }
+  buf[i] = '\0';
+
+  if (buf[0] != '\x1b' || buf[1] != '[') {
+    return false;
+  }
+  if (sscanf(&buf[2], "%d;%d", &rows, &cols) != 2) {
+    return false;
+  }
+
+  return true;
+}
+
+bool Screen::getWindowSize() {
+  struct winsize ws;
+
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) {
+      return false;
+    }
+    return getCursorPosition();
+  } else {
+    cols = ws.ws_col;
+    rows = ws.ws_row;
+    return true;
+  }
+}
+
+void Screen::hideCursor() {
+  ab.append("\x1b[?25l", 6);
+}
+
+void Screen::inverse(bool on = true) {
+  if (on) {
+    ab.append("\x1b[7m", 4);
+  } else {
+    ab.append("\x1b[m", 3);
+  }
+}
+
+void Screen::moveCursor(std::size_t row, std::size_t col) {
+    if (row == 0 && col == 0) {
+        ab.append("\x1b[H", 3);
+    } else {
+      char buf[32];
+      snprintf(buf, sizeof(buf), "\x1b[%ld;%ldH", row, col);
+      ab.append(buf, strlen(buf));
+    }
+}
+
+void:: Screen::print(const char* s, std::size_t len) {
+  ab.append(s, len);
+}
+
+int Screen::readKey() {
   int nread;
   char c;
   while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
@@ -203,49 +274,68 @@ int editorReadKey() {
   }
 }
 
-int getCursorPosition(int *rows, int *cols) {
-  char buf[32];
-  unsigned int i = 0;
-
-  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) {
-    return -1;
+void Screen::refresh() {
+  if (write(STDOUT_FILENO, ab.data(), ab.size()) == -1) {
+    screen.die("write");
   }
-
-  while (i < sizeof(buf) - 1) {
-    if (read(STDIN_FILENO, &buf[i], 1) != 1) {
-      break;
-    }
-    if (buf[i] == 'R') {
-      break;
-    }
-    i++;
-  }
-  buf[i] = '\0';
-
-  if (buf[0] != '\x1b' || buf[1] != '[') {
-    return -1;
-  }
-  if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) {
-    return -1;
-  }
-
-  return 0;
+  ab.clear();
 }
 
-int getWindowSize(int *rows, int *cols) {
-  struct winsize ws;
-
-  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) {
-      return -1;
-    }
-    return getCursorPosition(rows, cols);
-  } else {
-    *cols = ws.ws_col;
-    *rows = ws.ws_row;
-    return 0;
-  }
+void Screen::setFGColor(FGColor color) {
+  char buf[16];
+  int clen =
+    snprintf(buf, sizeof(buf), "\x1b[%dm", static_cast<int>(color));
+  ab.append(buf, clen);
 }
+
+void Screen::showCursor() {
+  ab.append("\x1b[?25h", 6);
+}
+
+struct EditorConfig {
+  EditorConfig();
+  EditorConfig(const EditorConfig&)=delete;
+  EditorConfig& operator=(const EditorConfig&)=delete;
+
+  std::size_t cx, cy;
+  std::size_t rx;
+  std::size_t rowoff;
+  std::size_t coloff;
+  std::vector<Row> rows;
+  bool dirty;
+  std::string filename;
+  char statusmsg[80];
+  time_t statusmsg_time;
+  std::optional<EditorSyntax> syntax;
+} E;
+
+EditorConfig::EditorConfig() : cx{0}, cy{0}, rx{0}, rowoff{0}, coloff{0},
+rows{}, dirty{false}, filename{}, statusmsg{0}, statusmsg_time{0},
+syntax{std::nullopt} {
+}
+
+/*** filetypes ***/
+
+std::vector<EditorSyntax> hldb {
+  {
+    "c",
+    { ".c", ".h", ".cc", ".cpp" },
+    {
+      "switch", "if", "while", "for", "break", "continue", "return", "else",
+      "struct", "union", "typedef", "static", "enum", "class", "case",
+      "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
+      "void|"
+    },
+    "//", "/*", "*/",
+    HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
+  }
+};
+
+/*** prototypes ***/
+
+void editorSetStatusMessage(const char *fmt, ...);
+void editorRefreshScreen();
+std::string editorPrompt(const char *prompt, void (*callback)(std::string&, int));
 
 /*** syntax highlighting ***/
 
@@ -507,7 +597,7 @@ void editorOpen(const char *filename) {
 
   FILE *fp = fopen(filename, "r");
   if (!fp) {
-    die("fopen");
+    screen.die("fopen");
   }
 
   char *line = NULL;
@@ -636,7 +726,7 @@ std::string editorPrompt(const char *prompt, void (*callback)(std::string&, int)
     editorSetStatusMessage(prompt, buf.c_str());
     editorRefreshScreen();
 
-    int c = editorReadKey();
+    int c = screen.readKey();
     if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
     }
     else if (c == '\x1b') {
@@ -709,7 +799,7 @@ void editorMoveCursor(int key) {
 void editorProcessKeypress() {
   static int quit_times = KILO_QUIT_TIMES;
 
-  int c = editorReadKey();
+  int c = screen.readKey();
 
   switch (c) {
     case '\r':
@@ -723,11 +813,8 @@ void editorProcessKeypress() {
         quit_times--;
         return;
       }
-      if (write(STDOUT_FILENO, "\x1b[2J", 4) == -1) {
-        die("write");
-      }
-      if (write(STDOUT_FILENO, "\x1b[H", 3) == -1) {
-        die("write");
+      if (!screen.clear()) {
+        screen.die("write");
       }
       exit(0);
       break;
@@ -765,13 +852,13 @@ void editorProcessKeypress() {
         if (c == PAGE_UP) {
           E.cy = E.rowoff;
         } else if (c == PAGE_DOWN) {
-          E.cy = E.rowoff + E.screenrows - 1;
+          E.cy = E.rowoff + screen.rows - 1;
           if (E.cy > E.rows.size()) {
             E.cy = E.rows.size();
           }
         }
 
-        int times = E.screenrows;
+        int times = screen.rows;
         while (times--) {
           editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
         }
@@ -809,147 +896,133 @@ void editorScroll() {
   if (E.cy < E.rowoff) {
     E.rowoff = E.cy;
   }
-  if (E.cy >= E.rowoff + E.screenrows) {
-    E.rowoff = E.cy - E.screenrows + 1;
+  if (E.cy >= E.rowoff + screen.rows) {
+    E.rowoff = E.cy - screen.rows + 1;
   }
   if (E.rx < E.coloff) {
     E.coloff = E.rx;
   }
-  if (E.rx >= E.coloff + E.screencols) {
-    E.coloff = E.rx - E.screencols + 1;
+  if (E.rx >= E.coloff + screen.cols) {
+    E.coloff = E.rx - screen.cols + 1;
   }
 }
 
-void editorDrawRows(std::string& ab) {
-  for (auto y = 0; y < E.screenrows; y++) {
+void editorDrawRows() {
+  for (auto y = 0; y < screen.rows; y++) {
     std::size_t filerow = y + E.rowoff;
     if (filerow >= E.rows.size()) {
-      if (E.rows.size() == 0 && y == E.screenrows / 3) {
+      if (E.rows.size() == 0 && y == screen.rows / 3) {
         char welcome[80];
         int welcomelen = snprintf(welcome, sizeof(welcome),
           "Kilo editor -- version %s", KILO_VERSION);
-        if (welcomelen > E.screencols) {
-          welcomelen = E.screencols;
+        if (welcomelen > screen.cols) {
+          welcomelen = screen.cols;
         }
-        int padding = (E.screencols - welcomelen) / 2;
+        int padding = (screen.cols - welcomelen) / 2;
         if (padding) {
-          ab.append("~", 1);
+          screen.print("~", 1);
           padding--;
         }
         while (padding--) {
-          ab.append(" ", 1);
+          screen.print(" ", 1);
         }
-        ab.append(welcome, welcomelen);
+        screen.print(welcome, welcomelen);
       } else {
-        ab.append("~", 1);
+        screen.print("~", 1);
       }
     } else {
       int len = E.rows[filerow].render.length() - E.coloff;
       if (len < 0) {
         len = 0;
       }
-      if (len > E.screencols) {
-        len = E.screencols;
+      if (len > screen.cols) {
+        len = screen.cols;
       }
       char *c = &E.rows[filerow].render[E.coloff];
       HL* hl = &E.rows[filerow].hl[E.coloff];
-      FGColor current_color = FGColor::WHITE;
+      FGColor current_color = FGColor::RESET;
       for (auto j = 0; j < len; j++) {
         if (iscntrl(c[j])) {
           char sym = (c[j] <= 26) ? '@' + c[j] : '?';
-          ab.append("\x1b[7m", 4);
-          ab.append(&sym, 1);
-          ab.append("\x1b[m", 3);
-          if (current_color != FGColor::WHITE) {
-            char buf[16];
-            int clen = snprintf(buf, sizeof(buf), "\x1b[%dm",
-              static_cast<int>(current_color));
-            ab.append(buf, clen);
+          screen.inverse();
+          screen.print(&sym, 1);
+          screen.inverse(false);
+          if (current_color != FGColor::RESET) {
+            screen.setFGColor(current_color);
           }
         } else if (hl[j] == HL::NORMAL) {
-          if (current_color != FGColor::WHITE) {
-            ab.append("\x1b[39m", 5);
-            current_color = FGColor::WHITE;
+          if (current_color != FGColor::RESET) {
+            screen.setFGColor(FGColor::RESET);
+            current_color = FGColor::RESET;
           }
-          ab.append(&c[j], 1);
+          screen.print(&c[j], 1);
         } else {
           FGColor color = editorSyntaxToColor(hl[j]);
           if (color != current_color) {
             current_color = color;
-            char buf[16];
-            int clen = snprintf(buf, sizeof(buf), "\x1b[%dm",
-              static_cast<int>(color));
-            ab.append(buf, clen);
+            screen.setFGColor(color);
           }
-          ab.append(&c[j], 1);
+          screen.print(&c[j], 1);
         }
       }
-      ab.append("\x1b[39m", 5);
+      screen.setFGColor(FGColor::RESET);
     }
 
-    ab.append("\x1b[K", 3);
-    ab.append("\r\n", 2);
+    screen.clearToEOL();
+    screen.print("\r\n", 2);
   }
 }
 
-void editorDrawStatusBar(std::string& ab) {
-  ab.append("\x1b[7m", 4);
+void editorDrawStatusBar() {
+  screen.inverse();
   char status[80], rstatus[80];
   int len = snprintf(status, sizeof(status), "%.20s - %ld lines %s",
     E.filename.empty() ? "[No Name]" : E.filename.c_str(), E.rows.size(),
     E.dirty ? "(modified)" : "");
   int rlen = snprintf(rstatus, sizeof(rstatus), "%s | %ld/%ld",
     E.syntax ? E.syntax->filetype.c_str() : "no ft", E.cy + 1, E.rows.size());
-  if (len > E.screencols) {
-    len = E.screencols;
+  if (len > screen.cols) {
+    len = screen.cols;
   }
-  ab.append(status, len);
-  while (len < E.screencols) {
-    if (E.screencols - len == rlen) {
-      ab.append(rstatus, rlen);
+  screen.print(status, len);
+  while (len < screen.cols) {
+    if (screen.cols - len == rlen) {
+      screen.print(rstatus, rlen);
       break;
     } else {
-      ab.append(" ", 1);
+      screen.print(" ", 1);
       len++;
     }
   }
-  ab.append("\x1b[m", 3);
-  ab.append("\r\n", 2);
+  screen.inverse(false);
+  screen.print("\r\n", 2);
 }
 
-void editorDrawMessageBar(std::string& ab) {
-  ab.append("\x1b[K", 3);
+void editorDrawMessageBar() {
+  screen.clearToEOL();
   int msglen = strlen(E.statusmsg);
-  if (msglen > E.screencols) {
-    msglen = E.screencols;
+  if (msglen > screen.cols) {
+    msglen = screen.cols;
   }
   if (msglen && time(NULL) - E.statusmsg_time < 5) {
-    ab.append(E.statusmsg, msglen);
+    screen.print(E.statusmsg, msglen);
   }
 }
 
 void editorRefreshScreen() {
   editorScroll();
 
-  std::string ab;
+  screen.hideCursor();
+  screen.moveCursor(0, 0);
 
-  ab.append("\x1b[?25l", 6);
-  ab.append("\x1b[H", 3);
+  editorDrawRows();
+  editorDrawStatusBar();
+  editorDrawMessageBar();
 
-  editorDrawRows(ab);
-  editorDrawStatusBar(ab);
-  editorDrawMessageBar(ab);
+  screen.moveCursor((E.cy - E.rowoff) + 1, (E.rx - E.coloff) + 1);
+  screen.showCursor();
 
-  char buf[32];
-  snprintf(buf, sizeof(buf), "\x1b[%ld;%ldH", (E.cy - E.rowoff) + 1,
-                                            (E.rx - E.coloff) + 1);
-  ab.append(buf, strlen(buf));
-
-  ab.append("\x1b[?25h", 6);
-
-  if (write(STDOUT_FILENO, ab.data(), ab.size()) == -1) {
-    die("write");
-  }
+  screen.refresh();
 }
 
 void editorSetStatusMessage(const char *fmt, ...) {
@@ -962,16 +1035,7 @@ void editorSetStatusMessage(const char *fmt, ...) {
 
 /*** init ***/
 
-void initEditor() {
-  if (getWindowSize(&E.screenrows, &E.screencols) == -1) {
-    die("getWindowSize");
-  }
-  E.screenrows -= 2;
-}
-
 int main(int argc, const char *argv[]) {
-  enableRawMode();
-  initEditor();
   if (argc >= 2) {
     editorOpen(argv[1]);
   }
