@@ -19,9 +19,6 @@
 
 #include "row.h"
 #include "screen.h"
-#include "syntax.h"
-
-/*** defines ***/
 
 constexpr const char* KILO_VERSION = "0.0.1";
 
@@ -29,14 +26,57 @@ constexpr const int KILO_QUIT_TIMES = 3;
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 
-/*** data ***/
+enum class HL : unsigned char {
+  NORMAL = 0,
+  COMMENT,
+  MLCOMMENT,
+  KEYWORD1,
+  KEYWORD2,
+  STRING,
+  NUMBER,
+  MATCH
+};
 
-Screen screen;
+#define HL_HIGHLIGHT_NUMBERS (1<<0)
+#define HL_HIGHLIGHT_STRINGS (1<<1)
 
-struct EditorConfig {
-  EditorConfig();
-  EditorConfig(const EditorConfig&)=delete;
-  EditorConfig& operator=(const EditorConfig&)=delete;
+struct EditorSyntax {
+  std::string filetype;
+  std::vector<const char*> filematch;
+  std::vector<std::string> keywords;
+  std::string singleline_comment_start;
+  std::string multiline_comment_start;
+  std::string multiline_comment_end;
+  int flags;
+};
+
+struct Editor {
+  Editor();
+
+  void delChar();
+  void delRow(std::size_t);
+  void draw(Screen&);
+  void drawMessageBar(Screen&);
+  void drawRows(Screen&);
+  void drawStatusBar(Screen&);
+  void find(Screen&);
+  void findCallback(std::string&, int);
+  void insertChar(int);
+  void insertNewline();
+  void insertRow(std::size_t, const char*);
+  void moveCursor(int);
+  void openFile(Screen&, const char*);
+  void processKeypress(Screen&);
+  std::string prompt(Screen&, const char*,
+  std::optional<std::function<void(Editor*, std::string&, int)>>);
+  void saveFile(Screen&);
+  void scroll(Screen&);
+  void selectSyntaxHighlight();
+  void setStatusMessage(const char *fmt, ...);
+  void updateSyntax(Row& row);
+
+  Editor(const Editor&)=delete;
+  Editor& operator=(const Editor&)=delete;
 
   std::size_t cx, cy;
   std::size_t rx;
@@ -48,16 +88,29 @@ struct EditorConfig {
   char statusmsg[80];
   time_t statusmsg_time;
   std::optional<EditorSyntax> syntax;
+  std::vector<EditorSyntax> hldb;
 } E;
 
-EditorConfig::EditorConfig() : cx{0}, cy{0}, rx{0}, rowoff{0}, coloff{0},
-rows{}, dirty{false}, filename{}, statusmsg{0}, statusmsg_time{0},
-syntax{std::nullopt} {
+bool is_separator(int c) {
+  return isspace(c) || c == '\0' || strchr(",.()+-/*=~%<>[];", c) != NULL;
 }
 
-/*** filetypes ***/
+FGColor syntaxToColor(HL hl) {
+  switch (hl) {
+    case HL::COMMENT:
+    case HL::MLCOMMENT: return FGColor::CYAN;
+    case HL::KEYWORD1: return FGColor::YELLOW;
+    case HL::KEYWORD2: return FGColor::GREEN;
+    case HL::STRING: return FGColor::MAGENTA;
+    case HL::NUMBER: return FGColor::RED;
+    case HL::MATCH: return FGColor::BLUE;
+    default: return FGColor::WHITE;
+  }
+}
 
-std::vector<EditorSyntax> hldb {
+Editor::Editor() : cx{0}, cy{0}, rx{0}, rowoff{0}, coloff{0},
+rows{}, dirty{false}, filename{}, statusmsg{}, statusmsg_time{0},
+syntax{std::nullopt}, hldb {
   {
     "c",
     { ".c", ".h", ".cc", ".cpp" },
@@ -70,31 +123,565 @@ std::vector<EditorSyntax> hldb {
     "//", "/*", "*/",
     HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
   }
-};
-
-/*** prototypes ***/
-
-void editorSetStatusMessage(const char *fmt, ...);
-void editorRefreshScreen();
-std::string editorPrompt(const char *prompt, void (*callback)(std::string&, int));
-
-/*** syntax highlighting ***/
-
-bool is_separator(int c) {
-  return isspace(c) || c == '\0' || strchr(",.()+-/*=~%<>[];", c) != NULL;
+} {
 }
 
-void editorUpdateSyntax(Row& row) {
-  row.hl.resize(row.render.length());
-  std::fill(row.hl.begin(), row.hl.end(), HL::NORMAL);
-
-  if (E.syntax == std::nullopt) {
+void Editor::delChar() {
+  if (cy == rows.size()) {
+    return;
+  }
+  if (cx == 0 && cy == 0) {
     return;
   }
 
-  auto& scs = E.syntax->singleline_comment_start;
-  auto& mcs = E.syntax->multiline_comment_start;
-  auto& mce = E.syntax->multiline_comment_end;
+  Row& row = rows[cy];
+  if (cx > 0) {
+    row.erase(cx - 1);
+    updateSyntax(row);
+    cx--;
+  } else {
+    cx = rows[cy - 1].chars.length();
+    rows[cy - 1].append(row.chars);
+    updateSyntax(rows[cy - 1]);
+    delRow(cy);
+    cy--;
+  }
+  dirty = true;
+}
+
+void Editor::delRow(std::size_t at) {
+  if (at >= rows.size()) {
+    return;
+  }
+  rows.erase(rows.begin() + at);
+  dirty = true;
+}
+
+void Editor::drawMessageBar(Screen& screen) {
+  screen.clearToEOL();
+  int msglen = strlen(statusmsg);
+  if (msglen > screen.cols) {
+    msglen = screen.cols;
+  }
+  if (msglen && time(NULL) - statusmsg_time < 5) {
+    screen.print(statusmsg, msglen);
+  }
+}
+
+void Editor::drawRows(Screen& screen) {
+  for (auto y = 0; y < screen.rows; y++) {
+    std::size_t filerow = y + rowoff;
+    if (filerow >= rows.size()) {
+      if (rows.size() == 0 && y == screen.rows / 3) {
+        char welcome[80];
+        int welcomelen = snprintf(welcome, sizeof(welcome),
+          "Kilo editor -- version %s", KILO_VERSION);
+        if (welcomelen > screen.cols) {
+          welcomelen = screen.cols;
+        }
+        int padding = (screen.cols - welcomelen) / 2;
+        if (padding) {
+          screen.print("~", 1);
+          padding--;
+        }
+        while (padding--) {
+          screen.print(" ", 1);
+        }
+        screen.print(welcome, welcomelen);
+      } else {
+        screen.print("~", 1);
+      }
+    } else {
+      int len = rows[filerow].render.length() - coloff;
+      if (len < 0) {
+        len = 0;
+      }
+      if (len > screen.cols) {
+        len = screen.cols;
+      }
+      char* c = &rows[filerow].render[coloff];
+      HL* hl = &rows[filerow].hl[coloff];
+      FGColor current_color = FGColor::RESET;
+      for (auto j = 0; j < len; j++) {
+        if (iscntrl(c[j])) {
+          char sym = (c[j] <= 26) ? '@' + c[j] : '?';
+          screen.inverse();
+          screen.print(&sym, 1);
+          screen.inverse(false);
+          if (current_color != FGColor::RESET) {
+            screen.setFGColor(current_color);
+          }
+        } else if (hl[j] == HL::NORMAL) {
+          if (current_color != FGColor::RESET) {
+            screen.setFGColor(FGColor::RESET);
+            current_color = FGColor::RESET;
+          }
+          screen.print(&c[j], 1);
+        } else {
+          FGColor color = syntaxToColor(hl[j]);
+          if (color != current_color) {
+            current_color = color;
+            screen.setFGColor(color);
+          }
+          screen.print(&c[j], 1);
+        }
+      }
+      screen.setFGColor(FGColor::RESET);
+    }
+
+    screen.clearToEOL();
+    screen.print("\r\n", 2);
+  }
+}
+
+void Editor::drawStatusBar(Screen& screen) {
+  screen.inverse();
+  char status[80], rstatus[80];
+  int len = snprintf(status, sizeof(status), "%.20s - %ld lines %s",
+    filename.empty() ? "[No Name]" : filename.c_str(), rows.size(),
+    dirty ? "(modified)" : "");
+  int rlen = snprintf(rstatus, sizeof(rstatus), "%s | %ld/%ld",
+    syntax ? syntax->filetype.c_str() : "no ft", cy + 1, rows.size());
+  if (len > screen.cols) {
+    len = screen.cols;
+  }
+  screen.print(status, len);
+  while (len < screen.cols) {
+    if (screen.cols - len == rlen) {
+      screen.print(rstatus, rlen);
+      break;
+    } else {
+      screen.print(" ", 1);
+      len++;
+    }
+  }
+  screen.inverse(false);
+  screen.print("\r\n", 2);
+}
+
+void Editor::draw(Screen& screen) {
+  scroll(screen);
+
+  screen.hideCursor();
+  screen.moveCursor(0, 0);
+
+  drawRows(screen);
+  drawStatusBar(screen);
+  drawMessageBar(screen);
+
+  screen.moveCursor((cy - rowoff) + 1, (rx - coloff) + 1);
+  screen.showCursor();
+
+  screen.refresh();
+}
+
+void Editor::find(Screen& screen) {
+  int saved_cx = cx;
+  int saved_cy = cy;
+  int saved_coloff = coloff;
+  int saved_rowoff = rowoff;
+
+  std::string query = prompt(screen, "Search: %s (Use ESC/Arrows/Enter)",
+    std::make_optional(&Editor::findCallback));
+
+  if (query.empty()) {
+    cx = saved_cx;
+    cy = saved_cy;
+    coloff = saved_coloff;
+    rowoff = saved_rowoff;
+  }
+}
+
+void Editor::findCallback(std::string& query, int key) {
+  static std::optional<std::size_t> last_match = std::nullopt;
+  static int direction = 1;
+
+  static int saved_hl_line;
+  static Highlight saved_hl;
+
+  if (!saved_hl.empty()) {
+    rows[saved_hl_line].hl = saved_hl;
+    saved_hl.clear();
+  }
+
+  if (key == '\r' || key == '\x1b') {
+    last_match = std::nullopt;
+    direction = 1;
+    return;
+  } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
+    direction = 1;
+  } else if (key == ARROW_LEFT || key == ARROW_UP) {
+    direction = -1;
+  } else {
+    last_match = std::nullopt;
+    direction = 1;
+  }
+
+  if (last_match == std::nullopt) {
+    direction = 1;
+  }
+  std::optional<std::size_t> current = last_match;
+  for (std::size_t i = 0; i < rows.size(); i++) {
+    *current += direction;
+    if (current == std::nullopt) {
+      current = rows.size() - 1;
+    } else if (*current == rows.size()) {
+      current = 0;
+    }
+
+    Row& row = rows[*current];
+    auto match = row.render.find(query);
+    if (match != std::string::npos) {
+      last_match = *current;
+      cy = *current;
+      cx = row.rxtocx(match);
+      rowoff = rows.size();
+
+      saved_hl_line = *current;
+      saved_hl = row.hl;
+      std::fill(row.hl.begin() + match,
+        row.hl.begin() + match + query.length(), HL::MATCH);
+      break;
+    }
+  }
+}
+
+void Editor::insertChar(int c) {
+  if (cy == rows.size()) {
+    insertRow(rows.size(), "");
+  }
+  rows[cy].insert(cx, c);
+  updateSyntax(rows[cy]);
+  dirty = true;
+  cx++;
+}
+
+void Editor::insertNewline() {
+  if (cx == 0) {
+    insertRow(cy, "");
+  } else {
+    Row* row = &rows[cy];
+    auto copy = row->chars.substr(cx);
+    insertRow(cy + 1, copy.c_str());
+    row = &rows[cy];
+    row->chars.erase(cx);
+    row->update();
+    updateSyntax(*row);
+  }
+  cy++;
+  cx = 0;
+}
+
+void Editor::insertRow(std::size_t at, const char* s) {
+  if (at > rows.size()) {
+    return;
+  }
+
+  rows.emplace(rows.begin() + at, at, s);
+
+  for (auto j = at + 1; j < rows.size(); j++) {
+    rows[j].idx++;
+  }
+
+  rows[at].update();
+
+  dirty = true;
+}
+
+void Editor::moveCursor(int key) {
+  std::optional<std::reference_wrapper<Row>> row = (cy >= rows.size())
+    ? std::nullopt
+    : std::make_optional(std::ref(rows[cy]));
+
+  switch (key) {
+    case ARROW_LEFT:
+      if (cx != 0) {
+        cx--;
+      } else if (cy > 0) {
+        cy--;
+        cx = rows[cy].chars.length();
+      }
+      break;
+    case ARROW_RIGHT:
+      if (row && cx < row->get().chars.length()) {
+        cx++;
+      } else if (row && cx == row->get().chars.length()) {
+        cy++;
+        cx = 0;
+      }
+      break;
+    case ARROW_UP:
+      if (cy != 0) {
+        cy--;
+      }
+      break;
+    case ARROW_DOWN:
+      if (cy < rows.size()) {
+        cy++;
+      }
+      break;
+  }
+
+  row = (cy >= rows.size())
+    ? std::nullopt
+    : std::make_optional(std::ref(rows[cy]));
+  std::size_t rowlen = row ? row->get().chars.length() : 0;
+  if (cx > rowlen) {
+    cx = rowlen;
+  }
+}
+
+void Editor::openFile(Screen& screen, const char *fn) {
+  filename = fn;
+
+  selectSyntaxHighlight();
+
+  FILE *fp = fopen(fn, "r");
+  if (!fp) {
+    screen.die("fopen");
+  }
+
+  char *line = NULL;
+  size_t linecap = 0;
+  ssize_t linelen;
+  while ((linelen = getline(&line, &linecap, fp)) != -1) {
+    while (linelen > 0 && (line[linelen - 1] == '\n' ||
+                           line[linelen - 1] == '\r')) {
+      linelen--;
+    }
+    insertRow(rows.size(), line);
+    rows[rows.size() - 1].erase(linelen);
+    updateSyntax(rows[rows.size() - 1]);
+  }
+  free(line);
+  fclose(fp);
+  dirty = false;
+}
+
+void Editor::processKeypress(Screen& screen) {
+  static int quit_times = KILO_QUIT_TIMES;
+
+  int c = screen.readKey();
+
+  switch (c) {
+    case '\r':
+      insertNewline();
+      break;
+
+    case CTRL_KEY('q'):
+      if (dirty && quit_times > 0) {
+        setStatusMessage("WARNING!!! File has unsaved changes. "
+          "Press Ctrl-Q %d more times to quit.", quit_times);
+        quit_times--;
+        return;
+      }
+      if (!screen.clear()) {
+        screen.die("write");
+      }
+      exit(0);
+      break;
+
+    case CTRL_KEY('s'):
+      saveFile(screen);
+      break;
+
+    case HOME_KEY:
+      cx = 0;
+      break;
+
+    case END_KEY:
+      if (cy < rows.size()) {
+        cx = rows[cy].chars.length();
+      }
+      break;
+
+    case CTRL_KEY('f'):
+      find(screen);
+      break;
+
+    case BACKSPACE:
+    case CTRL_KEY('h'):
+    case DEL_KEY:
+      if (c == DEL_KEY) {
+        moveCursor(ARROW_RIGHT);
+      }
+      delChar();
+      break;
+
+    case PAGE_UP:
+    case PAGE_DOWN:
+      {
+        if (c == PAGE_UP) {
+          cy = rowoff;
+        } else if (c == PAGE_DOWN) {
+          cy = rowoff + screen.rows - 1;
+          if (cy > rows.size()) {
+            cy = rows.size();
+          }
+        }
+
+        int times = screen.rows;
+        while (times--) {
+          moveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+        }
+      }
+      break;
+
+    case ARROW_UP:
+    case ARROW_DOWN:
+    case ARROW_LEFT:
+    case ARROW_RIGHT:
+      moveCursor(c);
+      break;
+
+    case CTRL_KEY('l'):
+    case '\x1b':
+      break;
+
+    default:
+      insertChar(c);
+      break;
+  }
+
+  quit_times = KILO_QUIT_TIMES;
+}
+
+std::string Editor::prompt(Screen& screen, const char* msg,
+std::optional<std::function<void(Editor*, std::string&, int)>> callback) {
+  std::string buf;
+
+  while (true) {
+    setStatusMessage(msg, buf.c_str());
+    draw(screen);
+
+    int c = screen.readKey();
+    if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
+    }
+    else if (c == '\x1b') {
+      setStatusMessage("");
+      if (callback) {
+        std::invoke(*callback, this, buf, c);
+      }
+      return "";
+    } else if (c == '\r') {
+      if (!buf.empty()) {
+        setStatusMessage("");
+        if (callback) {
+          std::invoke(*callback, this, buf, c);
+        }
+        return buf;
+      }
+    } else if (!iscntrl(c) && c < 128) {
+      buf += c;
+    }
+
+    if (callback) {
+      std::invoke(*callback, this, buf, c);
+    }
+  }
+}
+
+void Editor::saveFile(Screen& screen) {
+  if (filename.empty()) {
+    filename = prompt(screen, "Save as: %s (ESC to cancel)", std::nullopt);
+    if (filename.empty()) {
+      setStatusMessage("Save aborted");
+      return;
+    }
+    selectSyntaxHighlight();
+  }
+
+  std::string buf;
+
+  for (std::size_t j = 0; j < rows.size(); j++) {
+    buf += rows[j].chars + '\n';
+  }
+
+  int fd = open(filename.c_str(), O_RDWR | O_CREAT, 0644);
+  if (fd != -1) {
+    if (ftruncate(fd, buf.length()) != -1) {
+      if (write(fd, buf.data(), buf.length()) ==
+      static_cast<ssize_t>(buf.length())) {
+        close(fd);
+        dirty = false;
+        setStatusMessage("%ld bytes written to disk", buf.length());
+        return;
+      }
+    }
+    close(fd);
+  }
+
+  setStatusMessage("Can't save! I/O error: %s", strerror(errno));
+}
+
+void Editor::scroll(Screen& screen) {
+  rx = 0;
+
+  if (cy < rows.size()) {
+    rx = rows[cy].cxtorx(cx);
+  }
+
+  if (cy < rowoff) {
+    rowoff = cy;
+  }
+  if (cy >= rowoff + screen.rows) {
+    rowoff = cy - screen.rows + 1;
+  }
+  if (rx < coloff) {
+    coloff = rx;
+  }
+  if (rx >= coloff + screen.cols) {
+    coloff = rx - screen.cols + 1;
+  }
+}
+
+void Editor::selectSyntaxHighlight() {
+  syntax = std::nullopt;
+
+  if (filename.empty()) {
+    return;
+  }
+
+  auto pos = filename.find_last_of('.');
+  pos = (pos == std::string::npos) ? 0 : pos;
+  std::string ext(filename, pos);
+
+  for (auto& hl: hldb) {
+    for (auto& match: hl.filematch) {
+      auto is_ext = (match[0] == '.');
+      if ((is_ext && ext != filename && ext == match) ||
+      (!is_ext && filename.find(match) != std::string::npos)) {
+        syntax = hl;
+
+        for (std::size_t filerow = 0; filerow < rows.size(); filerow++) {
+          updateSyntax(rows[filerow]);
+        }
+
+        return;
+      }
+    }
+  }
+}
+
+void Editor::setStatusMessage(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(statusmsg, sizeof(statusmsg), fmt, ap);
+  va_end(ap);
+  statusmsg_time = time(NULL);
+}
+
+void Editor::updateSyntax(Row& row) {
+  row.hl.resize(row.render.length());
+  std::fill(row.hl.begin(), row.hl.end(), HL::NORMAL);
+
+  if (syntax == std::nullopt) {
+    return;
+  }
+
+  auto& scs = syntax->singleline_comment_start;
+  auto& mcs = syntax->multiline_comment_start;
+  auto& mce = syntax->multiline_comment_end;
 
   int scs_len = scs.length();
   int mcs_len = mcs.length();
@@ -102,7 +689,7 @@ void editorUpdateSyntax(Row& row) {
 
   bool prev_sep = true;
   int in_string = 0;
-  int in_comment = (row.idx > 0 && E.rows[row.idx - 1].hl_open_comment);
+  int in_comment = (row.idx > 0 && rows[row.idx - 1].hl_open_comment);
 
   std::size_t i = 0;
   while (i < row.render.length()) {
@@ -138,7 +725,7 @@ void editorUpdateSyntax(Row& row) {
       }
     }
 
-    if (E.syntax->flags & HL_HIGHLIGHT_STRINGS) {
+    if (syntax->flags & HL_HIGHLIGHT_STRINGS) {
       if (in_string) {
         row.hl[i] = HL::STRING;
         if (c == '\\' && i + 1 < row.render.length()) {
@@ -162,7 +749,7 @@ void editorUpdateSyntax(Row& row) {
       }
     }
 
-    if (E.syntax->flags & HL_HIGHLIGHT_NUMBERS) {
+    if (syntax->flags & HL_HIGHLIGHT_NUMBERS) {
       if ((isdigit(c) && (prev_sep || prev_hl == HL::NUMBER)) ||
       (c == '.' && prev_hl == HL::NUMBER)) {
         row.hl[i] = HL::NUMBER;
@@ -174,7 +761,7 @@ void editorUpdateSyntax(Row& row) {
 
     if (prev_sep) {
       bool found = false;
-      for (auto& keyword: E.syntax->keywords) {
+      for (auto& keyword: syntax->keywords) {
         auto klen = keyword.length();
         int kw2 = keyword[klen - 1] == '|';
         if (kw2) {
@@ -202,590 +789,24 @@ void editorUpdateSyntax(Row& row) {
 
   int changed = (row.hl_open_comment != in_comment);
   row.hl_open_comment = in_comment;
-  if (changed && row.idx + 1 < E.rows.size()) {
-    editorUpdateSyntax(E.rows[row.idx + 1]);
+  if (changed && row.idx + 1 < rows.size()) {
+    updateSyntax(rows[row.idx + 1]);
   }
 }
 
-FGColor editorSyntaxToColor(HL hl) {
-  switch (hl) {
-    case HL::COMMENT:
-    case HL::MLCOMMENT: return FGColor::CYAN;
-    case HL::KEYWORD1: return FGColor::YELLOW;
-    case HL::KEYWORD2: return FGColor::GREEN;
-    case HL::STRING: return FGColor::MAGENTA;
-    case HL::NUMBER: return FGColor::RED;
-    case HL::MATCH: return FGColor::BLUE;
-    default: return FGColor::WHITE;
-  }
-}
-
-void editorSelectSyntaxHighlight() {
-  E.syntax = std::nullopt;
-
-  if (E.filename.empty()) {
-    return;
-  }
-
-  auto pos = E.filename.find_last_of('.');
-  pos = (pos == std::string::npos) ? 0 : pos;
-  std::string ext(E.filename, pos);
-
-  for (auto& hl: hldb) {
-    for (auto& match: hl.filematch) {
-      auto is_ext = (match[0] == '.');
-      if ((is_ext && ext != E.filename && ext == match) ||
-      (!is_ext && E.filename.find(match) != std::string::npos)) {
-        E.syntax = hl;
-
-        for (std::size_t filerow = 0; filerow < E.rows.size(); filerow++) {
-          editorUpdateSyntax(E.rows[filerow]);
-        }
-
-        return;
-      }
-    }
-  }
-}
-
-/*** row operations ***/
-
-void editorInsertRow(std::size_t at, const char *s) {
-  if (at > E.rows.size()) {
-    return;
-  }
-
-  E.rows.emplace(E.rows.begin() + at, at, s);
-  for (auto j = at + 1; j < E.rows.size(); j++) {
-    E.rows[j].idx++;
-  }
-
-  E.rows[at].update();
-
-  E.dirty = true;
-}
-
-void editorDelRow(std::size_t at) {
-  if (at >= E.rows.size()) {
-    return;
-  }
-  E.rows.erase(E.rows.begin() + at);
-  E.dirty = true;
-}
-
-/*** editor operations ***/
-
-void editorInsertChar(int c) {
-  if (E.cy == E.rows.size()) {
-    editorInsertRow(E.rows.size(), "");
-  }
-  E.rows[E.cy].insert(E.cx, c);
-  E.dirty = true;
-  E.cx++;
-}
-
-void editorInsertNewline() {
-  if (E.cx == 0) {
-    editorInsertRow(E.cy, "");
-  } else {
-    Row *row = &E.rows[E.cy];
-    editorInsertRow(E.cy + 1, &row->chars[E.cx]);
-    row = &E.rows[E.cy];
-    row->chars.erase(E.cx);
-    row->update();
-  }
-  E.cy++;
-  E.cx = 0;
-}
-
-void editorDelChar() {
-  if (E.cy == E.rows.size()) {
-    return;
-  }
-  if (E.cx == 0 && E.cy == 0) {
-    return;
-  }
-
-  Row *row = &E.rows[E.cy];
-  if (E.cx > 0) {
-    row->erase(E.cx - 1);
-    E.cx--;
-  } else {
-    E.cx = E.rows[E.cy - 1].chars.length();
-    E.rows[E.cy - 1].append(row->chars);
-    editorDelRow(E.cy);
-    E.cy--;
-  }
-  E.dirty = true;
-}
-
-/*** file i/o ***/
-
-std::string editorRowsToString() {
-  std::string buf;
-
-  for (std::size_t j = 0; j < E.rows.size(); j++) {
-    buf += E.rows[j].chars + '\n';
-  }
-
-  return buf;
-}
-
-void editorOpen(const char *filename) {
-  E.filename = filename;
-
-  editorSelectSyntaxHighlight();
-
-  FILE *fp = fopen(filename, "r");
-  if (!fp) {
-    screen.die("fopen");
-  }
-
-  char *line = NULL;
-  size_t linecap = 0;
-  ssize_t linelen;
-  while ((linelen = getline(&line, &linecap, fp)) != -1) {
-    while (linelen > 0 && (line[linelen - 1] == '\n' ||
-                           line[linelen - 1] == '\r')) {
-      linelen--;
-    }
-    editorInsertRow(E.rows.size(), line);
-    E.rows[E.rows.size() - 1].erase(linelen);
-  }
-  free(line);
-  fclose(fp);
-  E.dirty = false;
-}
-
-void editorSave() {
-  if (E.filename.empty()) {
-    E.filename = editorPrompt("Save as: %s (ESC to cancel)", NULL);
-    if (E.filename.empty()) {
-      editorSetStatusMessage("Save aborted");
-      return;
-    }
-    editorSelectSyntaxHighlight();
-  }
-
-  std::string buf = editorRowsToString();
-
-  int fd = open(E.filename.c_str(), O_RDWR | O_CREAT, 0644);
-  if (fd != -1) {
-    if (ftruncate(fd, buf.length()) != -1) {
-      if (write(fd, buf.data(), buf.length()) ==
-      static_cast<ssize_t>(buf.length())) {
-        close(fd);
-        E.dirty = false;
-        editorSetStatusMessage("%ld bytes written to disk", buf.length());
-        return;
-      }
-    }
-    close(fd);
-  }
-
-  editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
-}
-
-/*** find ***/
-
-void editorFindCallback(std::string& query, int key) {
-  static std::optional<std::size_t> last_match = std::nullopt;
-  static int direction = 1;
-
-  static int saved_hl_line;
-  static Highlight saved_hl;
-
-  if (!saved_hl.empty()) {
-    E.rows[saved_hl_line].hl = saved_hl;
-    saved_hl.clear();
-  }
-
-  if (key == '\r' || key == '\x1b') {
-    last_match = std::nullopt;
-    direction = 1;
-    return;
-  } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
-    direction = 1;
-  } else if (key == ARROW_LEFT || key == ARROW_UP) {
-    direction = -1;
-  } else {
-    last_match = std::nullopt;
-    direction = 1;
-  }
-
-  if (last_match == std::nullopt) {
-    direction = 1;
-  }
-  std::optional<std::size_t> current = last_match;
-  for (std::size_t i = 0; i < E.rows.size(); i++) {
-    *current += direction;
-    if (current == std::nullopt) {
-      current = E.rows.size() - 1;
-    } else if (*current == E.rows.size()) {
-      current = 0;
-    }
-
-    Row& row = E.rows[*current];
-    auto match = row.render.find(query);
-    if (match != std::string::npos) {
-      last_match = *current;
-      E.cy = *current;
-      E.cx = row.rxtocx(match);
-      E.rowoff = E.rows.size();
-
-      saved_hl_line = *current;
-      saved_hl = row.hl;
-      std::fill(row.hl.begin() + match,
-        row.hl.begin() + match + query.length(), HL::MATCH);
-      break;
-    }
-  }
-}
-
-void editorFind() {
-  int saved_cx = E.cx;
-  int saved_cy = E.cy;
-  int saved_coloff = E.coloff;
-  int saved_rowoff = E.rowoff;
-
-  std::string query = editorPrompt("Search: %s (Use ESC/Arrows/Enter)",
-    editorFindCallback);
-
-  if (query.empty()) {
-    E.cx = saved_cx;
-    E.cy = saved_cy;
-    E.coloff = saved_coloff;
-    E.rowoff = saved_rowoff;
-  }
-}
-
-/*** input ***/
-std::string editorPrompt(const char *prompt, void (*callback)(std::string&, int)) {
-  std::string buf;
-
-  while (true) {
-    editorSetStatusMessage(prompt, buf.c_str());
-    editorRefreshScreen();
-
-    int c = screen.readKey();
-    if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
-    }
-    else if (c == '\x1b') {
-      editorSetStatusMessage("");
-      if (callback) {
-        callback(buf, c);
-      }
-      return "";
-    } else if (c == '\r') {
-      if (!buf.empty()) {
-        editorSetStatusMessage("");
-        if (callback) {
-          callback(buf, c);
-        }
-        return buf;
-      }
-    } else if (!iscntrl(c) && c < 128) {
-      buf += c;
-    }
-
-    if (callback) {
-      callback(buf, c);
-    }
-  }
-}
-
-void editorMoveCursor(int key) {
-  std::optional<std::reference_wrapper<Row>> row = (E.cy >= E.rows.size())
-    ? std::nullopt
-    : std::make_optional(std::ref(E.rows[E.cy]));
-
-  switch (key) {
-    case ARROW_LEFT:
-      if (E.cx != 0) {
-        E.cx--;
-      } else if (E.cy > 0) {
-        E.cy--;
-        E.cx = E.rows[E.cy].chars.length();
-      }
-      break;
-    case ARROW_RIGHT:
-      if (row && E.cx < row->get().chars.length()) {
-        E.cx++;
-      } else if (row && E.cx == row->get().chars.length()) {
-        E.cy++;
-        E.cx = 0;
-      }
-      break;
-    case ARROW_UP:
-      if (E.cy != 0) {
-        E.cy--;
-      }
-      break;
-    case ARROW_DOWN:
-      if (E.cy < E.rows.size()) {
-        E.cy++;
-      }
-      break;
-  }
-
-  row = (E.cy >= E.rows.size())
-    ? std::nullopt
-    : std::make_optional(std::ref(E.rows[E.cy]));
-  std::size_t rowlen = row ? row->get().chars.length() : 0;
-  if (E.cx > rowlen) {
-    E.cx = rowlen;
-  }
-}
-
-void editorProcessKeypress() {
-  static int quit_times = KILO_QUIT_TIMES;
-
-  int c = screen.readKey();
-
-  switch (c) {
-    case '\r':
-      editorInsertNewline();
-      break;
-
-    case CTRL_KEY('q'):
-      if (E.dirty && quit_times > 0) {
-        editorSetStatusMessage("WARNING!!! File has unsaved changes. "
-          "Press Ctrl-Q %d more times to quit.", quit_times);
-        quit_times--;
-        return;
-      }
-      if (!screen.clear()) {
-        screen.die("write");
-      }
-      exit(0);
-      break;
-
-    case CTRL_KEY('s'):
-      editorSave();
-      break;
-
-    case HOME_KEY:
-      E.cx = 0;
-      break;
-
-    case END_KEY:
-      if (E.cy < E.rows.size()) {
-        E.cx = E.rows[E.cy].chars.length();
-      }
-      break;
-
-    case CTRL_KEY('f'):
-      editorFind();
-      break;
-
-    case BACKSPACE:
-    case CTRL_KEY('h'):
-    case DEL_KEY:
-      if (c == DEL_KEY) {
-        editorMoveCursor(ARROW_RIGHT);
-      }
-      editorDelChar();
-      break;
-
-    case PAGE_UP:
-    case PAGE_DOWN:
-      {
-        if (c == PAGE_UP) {
-          E.cy = E.rowoff;
-        } else if (c == PAGE_DOWN) {
-          E.cy = E.rowoff + screen.rows - 1;
-          if (E.cy > E.rows.size()) {
-            E.cy = E.rows.size();
-          }
-        }
-
-        int times = screen.rows;
-        while (times--) {
-          editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
-        }
-      }
-      break;
-
-    case ARROW_UP:
-    case ARROW_DOWN:
-    case ARROW_LEFT:
-    case ARROW_RIGHT:
-      editorMoveCursor(c);
-      break;
-
-    case CTRL_KEY('l'):
-    case '\x1b':
-      break;
-
-    default:
-      editorInsertChar(c);
-      break;
-  }
-
-  quit_times = KILO_QUIT_TIMES;
-}
-
-/*** output ***/
-
-void editorScroll() {
-  E.rx = 0;
-
-  if (E.cy < E.rows.size()) {
-    E.rx = E.rows[E.cy].cxtorx(E.cx);
-  }
-
-  if (E.cy < E.rowoff) {
-    E.rowoff = E.cy;
-  }
-  if (E.cy >= E.rowoff + screen.rows) {
-    E.rowoff = E.cy - screen.rows + 1;
-  }
-  if (E.rx < E.coloff) {
-    E.coloff = E.rx;
-  }
-  if (E.rx >= E.coloff + screen.cols) {
-    E.coloff = E.rx - screen.cols + 1;
-  }
-}
-
-void editorDrawRows() {
-  for (auto y = 0; y < screen.rows; y++) {
-    std::size_t filerow = y + E.rowoff;
-    if (filerow >= E.rows.size()) {
-      if (E.rows.size() == 0 && y == screen.rows / 3) {
-        char welcome[80];
-        int welcomelen = snprintf(welcome, sizeof(welcome),
-          "Kilo editor -- version %s", KILO_VERSION);
-        if (welcomelen > screen.cols) {
-          welcomelen = screen.cols;
-        }
-        int padding = (screen.cols - welcomelen) / 2;
-        if (padding) {
-          screen.print("~", 1);
-          padding--;
-        }
-        while (padding--) {
-          screen.print(" ", 1);
-        }
-        screen.print(welcome, welcomelen);
-      } else {
-        screen.print("~", 1);
-      }
-    } else {
-      int len = E.rows[filerow].render.length() - E.coloff;
-      if (len < 0) {
-        len = 0;
-      }
-      if (len > screen.cols) {
-        len = screen.cols;
-      }
-      char *c = &E.rows[filerow].render[E.coloff];
-      HL* hl = &E.rows[filerow].hl[E.coloff];
-      FGColor current_color = FGColor::RESET;
-      for (auto j = 0; j < len; j++) {
-        if (iscntrl(c[j])) {
-          char sym = (c[j] <= 26) ? '@' + c[j] : '?';
-          screen.inverse();
-          screen.print(&sym, 1);
-          screen.inverse(false);
-          if (current_color != FGColor::RESET) {
-            screen.setFGColor(current_color);
-          }
-        } else if (hl[j] == HL::NORMAL) {
-          if (current_color != FGColor::RESET) {
-            screen.setFGColor(FGColor::RESET);
-            current_color = FGColor::RESET;
-          }
-          screen.print(&c[j], 1);
-        } else {
-          FGColor color = editorSyntaxToColor(hl[j]);
-          if (color != current_color) {
-            current_color = color;
-            screen.setFGColor(color);
-          }
-          screen.print(&c[j], 1);
-        }
-      }
-      screen.setFGColor(FGColor::RESET);
-    }
-
-    screen.clearToEOL();
-    screen.print("\r\n", 2);
-  }
-}
-
-void editorDrawStatusBar() {
-  screen.inverse();
-  char status[80], rstatus[80];
-  int len = snprintf(status, sizeof(status), "%.20s - %ld lines %s",
-    E.filename.empty() ? "[No Name]" : E.filename.c_str(), E.rows.size(),
-    E.dirty ? "(modified)" : "");
-  int rlen = snprintf(rstatus, sizeof(rstatus), "%s | %ld/%ld",
-    E.syntax ? E.syntax->filetype.c_str() : "no ft", E.cy + 1, E.rows.size());
-  if (len > screen.cols) {
-    len = screen.cols;
-  }
-  screen.print(status, len);
-  while (len < screen.cols) {
-    if (screen.cols - len == rlen) {
-      screen.print(rstatus, rlen);
-      break;
-    } else {
-      screen.print(" ", 1);
-      len++;
-    }
-  }
-  screen.inverse(false);
-  screen.print("\r\n", 2);
-}
-
-void editorDrawMessageBar() {
-  screen.clearToEOL();
-  int msglen = strlen(E.statusmsg);
-  if (msglen > screen.cols) {
-    msglen = screen.cols;
-  }
-  if (msglen && time(NULL) - E.statusmsg_time < 5) {
-    screen.print(E.statusmsg, msglen);
-  }
-}
-
-void editorRefreshScreen() {
-  editorScroll();
-
-  screen.hideCursor();
-  screen.moveCursor(0, 0);
-
-  editorDrawRows();
-  editorDrawStatusBar();
-  editorDrawMessageBar();
-
-  screen.moveCursor((E.cy - E.rowoff) + 1, (E.rx - E.coloff) + 1);
-  screen.showCursor();
-
-  screen.refresh();
-}
-
-void editorSetStatusMessage(const char *fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-  vsnprintf(E.statusmsg, sizeof(E.statusmsg), fmt, ap);
-  va_end(ap);
-  E.statusmsg_time = time(NULL);
-}
-
-/*** init ***/
+Screen screen;
 
 int main(int argc, const char *argv[]) {
+
   if (argc >= 2) {
-    editorOpen(argv[1]);
+    E.openFile(screen, argv[1]);
   }
 
-  editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
+  E.setStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
 
   while (true) {
-    editorRefreshScreen();
-    editorProcessKeypress();
+    E.draw(screen);
+    E.processKeypress(screen);
   }
 
   return 0;

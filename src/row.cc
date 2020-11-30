@@ -1,5 +1,4 @@
 #include "row.h"
-#include "syntax.h"
 
 constexpr const std::size_t KILO_TAB_STOP = 8;
 
@@ -49,8 +48,6 @@ void Row::update() {
       render[idx++] = j;
     }
   }
-
-  editorUpdateSyntax(*this);
 }
 
 int Row::cxtorx(int cx) {
