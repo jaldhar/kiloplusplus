@@ -1,4 +1,5 @@
 #include <cstring>
+#include <sstream>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
@@ -33,12 +34,13 @@ void Screen::clearToEOL() {
 }
 
 void Screen::die(const char *s) {
+  std::ostringstream msg;
   if (!clear()) {
-    perror("write");
+    msg << "write" << ": " << strerror(errno) << "\n";
+    throw(msg.str());
   }
-
-  perror(s);
-  exit(1);
+  msg << s << ": " << strerror(errno) << "\n";
+  throw(msg.str());
 }
 
 void Screen::disableRawMode() {

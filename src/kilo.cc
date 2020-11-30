@@ -6,16 +6,22 @@ Screen screen;
 
 int main(int argc, const char *argv[]) {
 
-  if (argc >= 2) {
-    E.openFile(screen, argv[1]);
+  try {
+    if (argc >= 2) {
+      E.openFile(screen, argv[1]);
+    }
+
+    E.setStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
+
+    while (true) {
+      E.draw(screen);
+      E.processKeypress(screen);
+    }
+
+  } catch(std::string& e) {
+    fprintf(stderr, "%s\n", e.c_str());
+    return EXIT_FAILURE;
   }
 
-  E.setStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
-
-  while (true) {
-    E.draw(screen);
-    E.processKeypress(screen);
-  }
-
-  return 0;
+  return EXIT_SUCCESS;
 }
