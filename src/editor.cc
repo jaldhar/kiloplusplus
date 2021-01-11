@@ -126,31 +126,31 @@ void Editor::drawRows(Screen& screen) {
       if (len > screen.cols) {
         len = screen.cols;
       }
-      char* c = &rows[filerow].render[coloff];
-      HL* hl = &rows[filerow].hl[coloff];
+      auto render = rows[filerow].render;
+      auto hl = rows[filerow].hl;
       FGColor current_color = FGColor::RESET;
       for (auto j = 0; j < len; j++) {
-        if (iscntrl(c[j])) {
-          char sym = (c[j] <= 26) ? '@' + c[j] : '?';
+        if (iscntrl(render[coloff + j])) {
+          char sym = (render[coloff + j] <= 26) ? '@' + render[coloff + j] : '?';
           screen.inverse();
           screen.print(&sym, 1);
           screen.inverse(false);
           if (current_color != FGColor::RESET) {
             screen.setFGColor(current_color);
           }
-        } else if (hl[j] == HL::NORMAL) {
+        } else if (hl[coloff + j] == HL::NORMAL) {
           if (current_color != FGColor::RESET) {
             screen.setFGColor(FGColor::RESET);
             current_color = FGColor::RESET;
           }
-          screen.print(&c[j], 1);
+          screen.print(&render[coloff + j], 1);
         } else {
-          FGColor color = syntaxToColor(hl[j]);
+          FGColor color = syntaxToColor(hl[coloff + j]);
           if (color != current_color) {
             current_color = color;
             screen.setFGColor(color);
           }
-          screen.print(&c[j], 1);
+          screen.print(&render[coloff + j], 1);
         }
       }
       screen.setFGColor(FGColor::RESET);
@@ -287,12 +287,12 @@ void Editor::insertNewline() {
   if (cx == 0) {
     insertRow(cy, "");
   } else {
-    Row& row = rows[cy];
-    insertRow(cy + 1, &row.chars[cx]);
-    row = rows[cy];
-    row.chars.erase(cx);
-    row.update();
-    updateSyntax(row);
+    auto copy = rows[cy].chars.substr(cx);
+    insertRow(cy + 1, copy.c_str());
+    updateSyntax(rows[cy + 1]);
+    rows[cy].chars.erase(cx);
+    rows[cy].update();
+    updateSyntax(rows[cy]);
   }
   cy++;
   cx = 0;
