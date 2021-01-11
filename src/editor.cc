@@ -4,14 +4,15 @@
 #include <cctype>
 #include <cerrno>
 #include <cstdarg>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <fcntl.h>
+#include <fstream>
 #include <unistd.h>
 #include "editor.h"
 #include "screen.h"
+
+namespace fs = std::filesystem;
 
 constexpr const char* KILO_VERSION = "0.0.1";
 
@@ -518,25 +519,23 @@ void Editor::saveFile(Screen& screen) {
 
   std::string buf;
 
-  for (std::size_t j = 0; j < rows.size(); j++) {
-    buf += rows[j].chars + '\n';
+  for (auto& row: rows) {
+    buf += row.chars + '\n';
   }
 
-  int fd = open(filename.c_str(), O_RDWR | O_CREAT, 0644);
-  if (fd != -1) {
-    if (ftruncate(fd, buf.length()) != -1) {
-      if (write(fd, buf.data(), buf.length()) ==
-      static_cast<ssize_t>(buf.length())) {
-        close(fd);
-        dirty = false;
-        setStatusMessage("%ld bytes written to disk", buf.length());
-        return;
-      }
-    }
-    close(fd);
+  try {
+    std::ofstream file(filename.native());
+    file.exceptions(std::ofstream::failbit);
+    fs::permissions(filename, fs::perms::owner_read | fs::perms::owner_write |
+      fs::perms::group_read | fs::perms::others_read);
+    fs::resize_file(filename, buf.length());
+    file.write(buf.data(), buf.length());
+    dirty = false;
+    setStatusMessage("%ld bytes written to disk", buf.length());
+  } catch (std::system_error& e) {
+    setStatusMessage("Can't save! %s", e.what());
+    filename.clear();
   }
-
-  setStatusMessage("Can't save! I/O error: %s", strerror(errno));
 }
 
 void Editor::scroll(Screen& screen) {
@@ -567,15 +566,14 @@ void Editor::selectSyntaxHighlight() {
     return;
   }
 
-  auto pos = filename.find_last_of('.');
-  pos = (pos == std::string::npos) ? 0 : pos;
-  std::string ext(filename, pos);
+  auto ext = filename.extension();
+  auto fn = filename.filename().native();
 
   for (auto& hl: hldb) {
     for (auto& match: hl.filematch) {
       auto is_ext = (match[0] == '.');
-      if ((is_ext && ext != filename && ext == match) ||
-      (!is_ext && filename.find(match) != std::string::npos)) {
+      if ((is_ext && ext != fn && ext == match) ||
+      (!is_ext && fn.find(match) != std::string::npos)) {
         syntax = hl;
 
         for (std::size_t filerow = 0; filerow < rows.size(); filerow++) {

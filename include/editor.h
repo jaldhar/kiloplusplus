@@ -1,6 +1,7 @@
 #ifndef EDITOR_H
 #define EDITOR_H
 
+#include <filesystem>
 #include <functional>
 #include <optional>
 #include <string>
@@ -69,7 +70,7 @@ struct Editor {
   std::size_t coloff;
   std::vector<Row> rows;
   bool dirty;
-  std::string filename;
+  std::filesystem::path filename;
   char statusmsg[80];
   time_t statusmsg_time;
   std::optional<EditorSyntax> syntax;
