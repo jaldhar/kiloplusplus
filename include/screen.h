@@ -35,7 +35,7 @@ struct Screen {
 
   bool clear();
   void clearToEOL();
-  void die(const char *s);
+  void die(const char*);
   void disableRawMode();
   void enableRawMode();
   bool getCursorPosition();
@@ -44,6 +44,7 @@ struct Screen {
   void inverse(bool = true);
   void moveCursor(std::size_t, std::size_t);
   void print(const char*, std::size_t);
+  void printChar(const char);
   int  readKey();
   void refresh();
   void setFGColor(FGColor);

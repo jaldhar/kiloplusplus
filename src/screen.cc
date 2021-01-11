@@ -134,8 +134,12 @@ void Screen::moveCursor(std::size_t row, std::size_t col) {
     }
 }
 
-void:: Screen::print(const char* s, std::size_t len) {
+void::Screen::print(const char* s, std::size_t len) {
   ab.append(s, len);
+}
+
+void::Screen::printChar(const char c) {
+  ab.append(1, c);
 }
 
 int Screen::readKey() {

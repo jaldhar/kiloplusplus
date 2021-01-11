@@ -108,15 +108,15 @@ void Editor::drawRows(Screen& screen) {
         }
         int padding = (screen.cols - welcomelen) / 2;
         if (padding) {
-          screen.print("~", 1);
+          screen.printChar('~');
           padding--;
         }
         while (padding--) {
-          screen.print(" ", 1);
+          screen.printChar(' ');
         }
         screen.print(welcome, welcomelen);
       } else {
-        screen.print("~", 1);
+        screen.printChar('~');
       }
     } else {
       int len = rows[filerow].render.length() - coloff;
@@ -133,7 +133,7 @@ void Editor::drawRows(Screen& screen) {
         if (iscntrl(render[coloff + j])) {
           char sym = (render[coloff + j] <= 26) ? '@' + render[coloff + j] : '?';
           screen.inverse();
-          screen.print(&sym, 1);
+          screen.printChar(sym);
           screen.inverse(false);
           if (current_color != FGColor::RESET) {
             screen.setFGColor(current_color);
@@ -143,14 +143,14 @@ void Editor::drawRows(Screen& screen) {
             screen.setFGColor(FGColor::RESET);
             current_color = FGColor::RESET;
           }
-          screen.print(&render[coloff + j], 1);
+          screen.printChar(render[coloff + j]);
         } else {
           FGColor color = syntaxToColor(hl[coloff + j]);
           if (color != current_color) {
             current_color = color;
             screen.setFGColor(color);
           }
-          screen.print(&render[coloff + j], 1);
+          screen.printChar(render[coloff + j]);
         }
       }
       screen.setFGColor(FGColor::RESET);
@@ -178,7 +178,7 @@ void Editor::drawStatusBar(Screen& screen) {
       screen.print(rstatus, rlen);
       break;
     } else {
-      screen.print(" ", 1);
+      screen.printChar(' ');
       len++;
     }
   }
