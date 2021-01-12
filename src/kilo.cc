@@ -13,9 +13,10 @@ int main(int argc, const char *argv[]) {
 
     E.setStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
 
-    while (true) {
+    bool running = true;
+    while (running) {
       E.draw(screen);
-      E.processKeypress(screen);
+      running = E.processKeypress(screen);
     }
 
   } catch(std::string& e) {

@@ -52,7 +52,7 @@ struct Editor {
   void insertRow(std::size_t, const char*);
   void moveCursor(int);
   void openFile(Screen&, const char*);
-  void processKeypress(Screen&);
+  bool processKeypress(Screen&);
   std::string prompt(Screen&, const char*,
   std::optional<std::function<void(Editor*, std::string&, int)>>);
   void saveFile(Screen&);

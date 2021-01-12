@@ -384,7 +384,7 @@ void Editor::openFile(Screen& screen, const char *fn) {
   dirty = false;
 }
 
-void Editor::processKeypress(Screen& screen) {
+bool Editor::processKeypress(Screen& screen) {
   static int quit_times = KILO_QUIT_TIMES;
 
   int c = screen.readKey();
@@ -399,13 +399,12 @@ void Editor::processKeypress(Screen& screen) {
         setStatusMessage("WARNING!!! File has unsaved changes. "
           "Press Ctrl-Q %d more times to quit.", quit_times);
         quit_times--;
-        return;
+        return true;
       }
       if (!screen.clear()) {
         screen.die("write");
       }
-      exit(0);
-      break;
+      return false;
 
     case CTRL_KEY('s'):
       saveFile(screen);
@@ -470,6 +469,7 @@ void Editor::processKeypress(Screen& screen) {
   }
 
   quit_times = KILO_QUIT_TIMES;
+  return true;
 }
 
 std::string Editor::prompt(Screen& screen, const char* msg,
