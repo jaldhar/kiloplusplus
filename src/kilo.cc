@@ -1,22 +1,21 @@
 #include "editor.h"
 #include "screen.h"
 
-Editor E;
-Screen screen;
-
 int main(int argc, const char *argv[]) {
+  Editor editor;
+  Screen screen;
 
   try {
     if (argc >= 2) {
-      E.openFile(screen, argv[1]);
+      editor.openFile(screen, argv[1]);
     }
 
-    E.setStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
+    editor.setStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
 
     bool running = true;
     while (running) {
-      E.draw(screen);
-      running = E.processKeypress(screen);
+      editor.draw(screen);
+      running = editor.processKeypress(screen);
     }
 
   } catch(std::string& e) {
